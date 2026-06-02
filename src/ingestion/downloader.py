@@ -105,97 +105,121 @@ class YouTubeDownloader:
         ffmpeg_bin = shutil.which("ffmpeg")
         return os.path.dirname(ffmpeg_bin) if ffmpeg_bin else None
 
-    def download_video(self, url: str, video_id: str = "video") -> str:
-        """Downloads the video file for OCR processing.
+    def _download(
+        self,
+        url: str,
+        out_path: str,
+        download_type: str = "audio",
+        video_id: str = "audio",
+    ) -> str:
+        """Generic download method with format fallback chain.
 
-        Retries with different client types if 403 is encountered.
+        Tries multiple format strings and multiple client types to handle
+        YouTube's ever-changing format availability.
+
+        Args:
+            url: YouTube URL.
+            out_path: Path for the output file.
+            download_type: 'audio' or 'video'.
+            video_id: Identifier for logging.
+
+        Returns:
+            Path to the downloaded file.
         """
+        # ── Format fallback chains ───────────────────────────────────────────
+        if download_type == "video":
+            format_fallbacks = [
+                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+                "bestvideo+bestaudio/best",
+                "worstvideo+worstaudio/worst",  # fallback to lowest quality
+            ]
+        else:  # audio
+            format_fallbacks = [
+                "bestaudio[ext=m4a]/bestaudio",
+                "bestaudio/best",
+                "worstaudio/worst",
+                "bestaudio[ext=webm]/bestaudio",  # some videos only have webm audio
+            ]
+
+        client_types = ["android", "web", "mweb", "tv"]
+        last_error = None
+
+        for client in client_types:
+            for fmt in format_fallbacks:
+                try:
+                    opts = self._get_base_opts()
+                    opts["extractor_args"]["youtube"]["player_client"] = [client]
+                    opts["format"] = fmt
+                    opts["outtmpl"] = out_path
+                    opts["ffmpeg_location"] = self._ffmpeg_dir()
+                    opts["overwrites"] = True
+                    opts["noplaylist"] = True
+                    opts["quiet"] = True
+                    opts["no_warnings"] = True
+
+                    if download_type == "audio":
+                        opts["postprocessors"] = [
+                            {
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": "192",
+                            }
+                        ]
+
+                    # For video: disable postprocessing to avoid ffmpeg merge errors
+                    # on poor quality videos
+                    if download_type == "video":
+                        opts["postprocessors"] = []
+
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([url])
+
+                    # Check for existence (audio may have .mp3 extension after pp)
+                    actual_path = out_path
+                    if download_type == "audio":
+                        # After postprocessing, the .mp3 file may be at a different path
+                        base_wo_ext = os.path.splitext(out_path)[0]
+                        possible_paths = [
+                            out_path,
+                            base_wo_ext + ".mp3",
+                            base_wo_ext + ".m4a",
+                            base_wo_ext + ".webm",
+                        ]
+                        for p in possible_paths:
+                            if os.path.exists(p):
+                                actual_path = p
+                                break
+
+                    if os.path.exists(actual_path):
+                        return actual_path
+
+                    last_error = FileNotFoundError(
+                        f"File not found after download: {out_path}"
+                    )
+
+                except Exception as e:
+                    last_error = e
+                    # If it's not a format/403 error, re-raise immediately
+                    estr = str(e).lower()
+                    if "403" not in estr and "format" not in estr and "requested" not in estr:
+                        raise
+
+        raise RuntimeError(
+            f"Failed to download {download_type} from {url} after trying "
+            f"{len(client_types)} clients × {len(format_fallbacks)} formats. "
+            f"Last error: {last_error}"
+        )
+
+    def download_video(self, url: str, video_id: str = "video") -> str:
+        """Downloads the video file for OCR processing."""
         filename = f"{video_id}.mp4"
         out_path = os.path.join(self.output_dir, filename)
         print(f"Downloading video [{video_id}] to {out_path}...")
-
-        client_types = ["android", "web", "mweb"]
-        last_error = None
-
-        for client in client_types:
-            try:
-                opts = self._get_base_opts()
-                opts["extractor_args"]["youtube"]["player_client"] = [client]
-                opts["format"] = (
-                    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
-                )
-                opts["outtmpl"] = out_path
-                opts["ffmpeg_location"] = self._ffmpeg_dir()
-                opts["overwrites"] = True
-                opts["noplaylist"] = True
-                opts["quiet"] = True
-                opts["no_warnings"] = True
-
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([url])
-
-                if not os.path.exists(out_path):
-                    raise FileNotFoundError(
-                        f"Video download failed — file not found: {out_path}"
-                    )
-                return out_path
-
-            except Exception as e:
-                last_error = e
-                if "403" not in str(e):
-                    raise
-
-        raise RuntimeError(
-            f"Failed to download video {url} after trying clients "
-            f"{client_types}: {last_error}"
-        )
+        return self._download(url, out_path, download_type="video", video_id=video_id)
 
     def download_audio(self, url: str, video_id: str = "audio") -> str:
-        """Downloads and converts to MP3 for Whisper transcription.
-
-        Retries with different client types if 403 is encountered.
-        """
+        """Downloads and converts to MP3 for Whisper transcription."""
         base_name = f"{video_id}_audio"
         out_path = os.path.join(self.output_dir, f"{base_name}.mp3")
         print(f"Downloading audio [{video_id}] to {out_path}...")
-
-        client_types = ["android", "web", "mweb"]
-        last_error = None
-
-        for client in client_types:
-            try:
-                opts = self._get_base_opts()
-                opts["extractor_args"]["youtube"]["player_client"] = [client]
-                opts["format"] = "bestaudio/best"
-                opts["postprocessors"] = [
-                    {
-                        "key": "FFmpegExtractAudio",
-                        "preferredcodec": "mp3",
-                        "preferredquality": "192",
-                    }
-                ]
-                opts["outtmpl"] = os.path.join(self.output_dir, base_name)
-                opts["ffmpeg_location"] = self._ffmpeg_dir()
-                opts["overwrites"] = True
-                opts["noplaylist"] = True
-                opts["quiet"] = True
-                opts["no_warnings"] = True
-
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([url])
-
-                if not os.path.exists(out_path):
-                    raise FileNotFoundError(
-                        f"Audio download failed — file not found: {out_path}"
-                    )
-                return out_path
-
-            except Exception as e:
-                last_error = e
-                if "403" not in str(e):
-                    raise
-
-        raise RuntimeError(
-            f"Failed to download audio {url} after trying clients "
-            f"{client_types}: {last_error}"
-        )
+        return self._download(url, out_path, download_type="audio", video_id=video_id)
