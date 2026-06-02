@@ -1,0 +1,577 @@
+import os
+import re
+from openai import OpenAI
+
+class GraphEnrichmentEngine:
+    """Applies centrality metrics, strategy/tactic generation, and path discovery to enrich the graph."""
+
+    def __init__(self, db_client, progress_cb=None):
+        self.db = db_client
+        self.api_key = os.environ.get("DEEPSEEK_API_KEY")
+        self.progress_cb = progress_cb
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url="https://api.deepseek.com",
+            timeout=30.0,
+        ) if self.api_key else None
+
+    # ── Centrality ────────────────────────────────────────────────────────────
+
+    def compute_betweenness_centrality(self):
+        """Returns low-degree nodes as proxies for semantically isolated concepts."""
+        print("Computing Graph Betweenness Centrality...")
+        if not self.db or not self.db.driver:
+            print("No DB connection to compute centrality.")
+            return []
+        query = """
+        MATCH (n)-[r]-()
+        WHERE n.name IS NOT NULL
+        WITH n, count(r) AS degree
+        ORDER BY degree ASC
+        RETURN n.name AS node, degree
+        LIMIT 10
+        """
+        try:
+            return self.db.execute_read(query)
+        except Exception as e:
+            print(f"Error computing centrality: {e}")
+            return []
+
+    def _parse_enrichment_suggestions(self, text):
+        """Parse LLM response for 'Node A -> [RELATION] -> Node B' patterns."""
+        relationships = []
+        pattern = r'([^>\n\-]+?)\s*->\s*\[?([A-Z][A-Z_]*)\]?\s*->\s*([^>\n\-]+?)(?:\n|$|\.)'
+        matches = re.findall(pattern, text, re.MULTILINE)
+        for match in matches:
+            subject = match[0].strip().strip('"').strip("'")
+            relation = match[1].strip()
+            obj = match[2].strip().strip('"').strip("'").rstrip('.')
+            if subject and relation and obj:
+                relationships.append({
+                    'subject': subject,
+                    'relation': relation,
+                    'object': obj
+                })
+        return relationships
+
+    # ── Phase A: Bridge isolated nodes ────────────────────────────────────────
+
+    def run_isolation_enrichment(self):
+        """
+        Identify isolated nodes (low degree) and propose bridging edges based on
+        'Action Leadership' pedagogy (e.g. Brain Balance, Innate Wisdom).
+        """
+        print("\n[Enrichment Phase A] Bridging isolated nodes...")
+        isolated_nodes = self.compute_betweenness_centrality()
+
+        if not isolated_nodes or not self.client:
+            print("Skipping isolation enrichment: missing nodes or API key.")
+            return
+
+        node_names = [record["node"] for record in isolated_nodes if record.get("node")]
+        print(f"Isolated nodes targeted for bridging: {node_names}")
+
+        prompt = f"""
+        As a pedagogical expert in "Action Leadership", how would you connect these isolated concepts:
+        {node_names}
+
+        Suggest exactly 3 new 'DEVELOPS_SKILL' or 'IS_PREREQUISITE_FOR' relationships that
+        bridge these nodes to the core concepts of "Brain Balance" or "Innate Wisdom".
+        Format each relationship on its own line as: Node A -> [RELATION] -> Node B
+        """
+
+        try:
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            content = response.choices[0].message.content
+            print("Enrichment Suggestions (isolation):")
+            print(content)
+
+            for s in self._parse_enrichment_suggestions(content):
+                self.db.insert_triplet(
+                    subject=s['subject'], subject_type='Concept',
+                    relation=s['relation'],
+                    obj=s['object'], obj_type='Concept'
+                )
+                print(f"  Inserted: ({s['subject']}) -[{s['relation']}]-> ({s['object']})")
+        except Exception as e:
+            print(f"Error in isolation enrichment LLM call: {e}")
+
+    # ── Phase B: Strategy & Tactic enrichment ────────────────────────────────
+
+    def _get_competencies_without_strategies(self):
+        """Find Competency/Concept nodes that have no outgoing HAS_STRATEGY edges."""
+        query = """
+        MATCH (n)
+        WHERE (n:Competency OR n:Concept) AND n.name IS NOT NULL
+          AND NOT (n)-[:HAS_STRATEGY]->()
+        RETURN n.name AS name, labels(n)[0] AS label
+        LIMIT 15
+        """
+        try:
+            return self.db.execute_read(query) or []
+        except Exception as e:
+            print(f"Error fetching competencies without strategies: {e}")
+            return []
+
+    def run_strategy_tactic_enrichment(self):
+        """
+        For each Competency/Concept without strategies, ask the LLM to generate
+        1-2 strategies and 2-3 concrete tactics per strategy, then insert them.
+        """
+        print("\n[Enrichment Phase B] Generating strategies and tactics...")
+        if not self.client:
+            print("Skipping strategy/tactic enrichment: no API key.")
+            return
+
+        targets = self._get_competencies_without_strategies()
+        if not targets:
+            print("All competencies already have strategies — skipping.")
+            return
+
+        for record in targets:
+            node_name = record.get("name")
+            node_label = record.get("label", "Competency")
+            if not node_name:
+                continue
+
+            print(f"  Generating strategies/tactics for: {node_name}")
+            prompt = f"""
+You are a leadership education expert building a knowledge graph.
+
+For the leadership {node_label.lower()} "{node_name}", provide:
+1. Exactly 2 high-level strategies (approaches) to develop or apply it.
+2. For each strategy, exactly 2 specific actionable tactics.
+
+Format STRICTLY as:
+"{node_name}" -> [HAS_STRATEGY] -> "Strategy Name 1"
+"Strategy Name 1" -> [HAS_TACTIC] -> "Tactic Name 1"
+"Strategy Name 1" -> [HAS_TACTIC] -> "Tactic Name 2"
+"{node_name}" -> [HAS_STRATEGY] -> "Strategy Name 2"
+"Strategy Name 2" -> [HAS_TACTIC] -> "Tactic Name 3"
+"Strategy Name 2" -> [HAS_TACTIC] -> "Tactic Name 4"
+
+Also add one LEADS_TO relationship showing what outcome this competency leads to:
+"{node_name}" -> [LEADS_TO] -> "Outcome Name"
+"""
+            try:
+                response = self.client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.5
+                )
+                content = response.choices[0].message.content
+                suggestions = self._parse_enrichment_suggestions(content)
+
+                for s in suggestions:
+                    # Determine node types from relation context
+                    if s['relation'] == 'HAS_STRATEGY':
+                        subj_type, obj_type = node_label, 'Strategy'
+                    elif s['relation'] == 'HAS_TACTIC':
+                        subj_type, obj_type = 'Strategy', 'Tactic'
+                    elif s['relation'] == 'LEADS_TO':
+                        subj_type, obj_type = node_label, 'Outcome'
+                    else:
+                        subj_type, obj_type = 'Concept', 'Concept'
+
+                    self.db.insert_triplet(
+                        subject=s['subject'], subject_type=subj_type,
+                        relation=s['relation'],
+                        obj=s['object'], obj_type=obj_type
+                    )
+                    print(f"    Inserted: ({s['subject']}) -[{s['relation']}]-> ({s['object']})")
+            except Exception as e:
+                print(f"  Error generating strategies for '{node_name}': {e}")
+
+    # ── Phase C: Learning path enrichment ────────────────────────────────────
+
+    def _get_prerequisite_chains(self):
+        """Find multi-hop IS_PREREQUISITE_FOR chains (length 2+) not yet bundled into a Path."""
+        query = """
+        MATCH path = (start)-[:IS_PREREQUISITE_FOR*2..5]->(end)
+        WHERE start.name IS NOT NULL AND end.name IS NOT NULL
+          AND NOT (start)-[:IS_PART_OF]->(:Path)
+        WITH start, end,
+             [n IN nodes(path) | n.name] AS steps
+        RETURN DISTINCT start.name AS start_node, end.name AS end_node, steps
+        LIMIT 10
+        """
+        try:
+            return self.db.execute_read(query) or []
+        except Exception as e:
+            print(f"Error fetching prerequisite chains: {e}")
+            return []
+
+    def run_path_enrichment(self):
+        """
+        Discover prerequisite chains in the graph and use the LLM to name them as
+        structured learning paths, then insert Path nodes with IS_PART_OF and LEADS_TO edges.
+        """
+        print("\n[Enrichment Phase C] Discovering and naming learning paths...")
+        if not self.client:
+            print("Skipping path enrichment: no API key.")
+            return
+
+        chains = self._get_prerequisite_chains()
+        if not chains:
+            print("No unbundled prerequisite chains found — skipping path enrichment.")
+            return
+
+        for chain in chains:
+            steps = chain.get("steps", [])
+            if len(steps) < 2:
+                continue
+
+            print(f"  Naming path for chain: {steps}")
+            prompt = f"""
+You are a leadership curriculum designer. The following ordered concepts form a natural
+learning progression in leadership education:
+
+Steps (in order): {steps}
+
+1. Give this learning path a concise, descriptive name (e.g. "Empathetic Leadership Path").
+2. Confirm it makes pedagogical sense.
+3. Output ONLY this single line:
+   "Path Name" -> [LEADS_TO] -> "{steps[-1]}"
+"""
+            try:
+                response = self.client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.4
+                )
+                content = response.choices[0].message.content.strip()
+                suggestions = self._parse_enrichment_suggestions(content)
+
+                for s in suggestions:
+                    if s['relation'] != 'LEADS_TO':
+                        continue
+                    path_name = s['subject']
+
+                    # Create the Path node -> end outcome
+                    self.db.insert_triplet(
+                        subject=path_name, subject_type='Path',
+                        relation='LEADS_TO',
+                        obj=s['object'], obj_type='Concept'
+                    )
+                    print(f"    Created Path: ({path_name}) -[LEADS_TO]-> ({s['object']})")
+
+                    # Link each step to the path via IS_PART_OF
+                    for idx, step in enumerate(steps):
+                        step_query = """
+                        MATCH (n {name: $name})
+                        MATCH (p:Path {name: $path})
+                        MERGE (n)-[r:IS_PART_OF]->(p)
+                        ON CREATE SET r.order = $order
+                        """
+                        try:
+                            self.db.execute_write(step_query, {
+                                "name": step, "path": path_name, "order": idx
+                            })
+                            print(f"    Linked step {idx}: ({step}) -[IS_PART_OF]-> ({path_name})")
+                        except Exception as e:
+                            print(f"    Failed to link step '{step}': {e}")
+
+                    # LEADS_TO edges between consecutive steps
+                    for idx in range(len(steps) - 1):
+                        self.db.insert_triplet(
+                            subject=steps[idx], subject_type='Concept',
+                            relation='LEADS_TO',
+                            obj=steps[idx + 1], obj_type='Concept'
+                        )
+            except Exception as e:
+                print(f"  Error naming path for chain {steps}: {e}")
+
+    # ── Phase D: Alternative strategy paths ──────────────────────────────────
+
+    def run_alternative_path_enrichment(self):
+        """
+        For each Strategy node, ask the LLM to suggest an alternative strategy that
+        achieves the same outcome, creating parallel paths in the graph.
+        """
+        print("\n[Enrichment Phase D] Adding alternative strategy paths...")
+        if not self.client:
+            print("Skipping alternative path enrichment: no API key.")
+            return
+
+        query = """
+        MATCH (c)-[:HAS_STRATEGY]->(s:Strategy)
+        WHERE c.name IS NOT NULL AND s.name IS NOT NULL
+        RETURN c.name AS competency, labels(c)[0] AS comp_label,
+               collect(s.name)[0..3] AS strategies
+        LIMIT 8
+        """
+        try:
+            records = self.db.execute_read(query) or []
+        except Exception as e:
+            print(f"Error fetching strategies: {e}")
+            return
+
+        for record in records:
+            competency = record.get("competency")
+            comp_label = record.get("comp_label", "Competency")
+            strategies = record.get("strategies", [])
+            if not competency or not strategies:
+                continue
+
+            print(f"  Finding alternative paths for: {competency} (existing: {strategies})")
+            prompt = f"""
+You are a leadership education expert. The competency "{competency}" is currently developed
+via these strategies: {strategies}.
+
+Suggest exactly 1 ALTERNATIVE strategy (different approach) with 2 concrete tactics.
+The alternative must be meaningfully different from the existing ones.
+
+Format:
+"{competency}" -> [HAS_STRATEGY] -> "Alternative Strategy Name"
+"Alternative Strategy Name" -> [HAS_TACTIC] -> "Tactic A"
+"Alternative Strategy Name" -> [HAS_TACTIC] -> "Tactic B"
+"""
+            try:
+                response = self.client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6
+                )
+                content = response.choices[0].message.content
+                suggestions = self._parse_enrichment_suggestions(content)
+
+                for s in suggestions:
+                    if s['relation'] == 'HAS_STRATEGY':
+                        subj_type, obj_type = comp_label, 'Strategy'
+                    elif s['relation'] == 'HAS_TACTIC':
+                        subj_type, obj_type = 'Strategy', 'Tactic'
+                    else:
+                        subj_type, obj_type = 'Concept', 'Concept'
+
+                    self.db.insert_triplet(
+                        subject=s['subject'], subject_type=subj_type,
+                        relation=s['relation'],
+                        obj=s['object'], obj_type=obj_type
+                    )
+                    print(f"    Inserted alt path: ({s['subject']}) -[{s['relation']}]-> ({s['object']})")
+            except Exception as e:
+                print(f"  Error generating alternative paths for '{competency}': {e}")
+
+    # ── Phase E: Prequels, sequels & explicit alternatives ───────────────────
+
+    def run_prequel_sequel_enrichment(self):
+        """
+        For each (Competency -> Strategy -> Tactics) cluster, ask the LLM to generate:
+        - PRECEDED_BY: what foundational concept/strategy must be mastered first (prequel)
+        - FOLLOWED_BY:  what the natural next step is after each tactic (sequel/post)
+        - HAS_ALTERNATIVE: a sibling strategy that is explicitly marked as an alternative
+          to the existing one, so both are surfaced as parallel options in the UI.
+        """
+        print("\n[Enrichment Phase E] Generating prequels, sequels & alternatives...")
+        if not self.client:
+            print("Skipping prequel/sequel enrichment: no API key.")
+            return
+
+        query = """
+        MATCH (c)-[:HAS_STRATEGY]->(s:Strategy)
+        WHERE c.name IS NOT NULL AND s.name IS NOT NULL
+        OPTIONAL MATCH (s)-[:HAS_TACTIC]->(t:Tactic)
+        RETURN c.name AS competency, labels(c)[0] AS comp_label,
+               s.name AS strategy,
+               collect(t.name)[0..4] AS tactics
+        LIMIT 12
+        """
+        try:
+            records = self.db.execute_read(query) or []
+        except Exception as e:
+            print(f"Error fetching strategy clusters: {e}")
+            return
+
+        for record in records:
+            competency  = record.get("competency")
+            comp_label  = record.get("comp_label", "Competency")
+            strategy    = record.get("strategy")
+            tactics     = record.get("tactics", [])
+            if not competency or not strategy:
+                continue
+
+            print(f"  Prequel/sequel/alt for: [{competency}] -> [{strategy}] (tactics: {tactics})")
+
+            prompt = f"""
+You are a leadership curriculum architect. Given this strategy cluster:
+
+Competency : "{competency}"
+Strategy   : "{strategy}"
+Tactics    : {tactics}
+
+Produce EXACTLY these 4 lines (no extra text, no numbering):
+
+1. One PRECEDED_BY line — the foundational concept or competency that must come BEFORE "{strategy}":
+   "{strategy}" -> [PRECEDED_BY] -> "Prerequisite Concept Name"
+
+2. One FOLLOWED_BY line per tactic — the natural NEXT step/tactic after each tactic in {tactics[:2]}:
+   "{tactics[0] if tactics else 'Tactic A'}" -> [FOLLOWED_BY] -> "Next Step Name"
+
+3. One HAS_ALTERNATIVE line — a meaningfully different strategy for "{competency}" that is
+   an explicit alternative to "{strategy}":
+   "{competency}" -> [HAS_ALTERNATIVE] -> "Alternative Strategy Name"
+
+4. One IS_PREQUEL_TO line connecting the prerequisite back to the competency:
+   "Prerequisite Concept Name" -> [IS_PREQUEL_TO] -> "{competency}"
+"""
+            try:
+                response = self.client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.5
+                )
+                content = response.choices[0].message.content
+                suggestions = self._parse_enrichment_suggestions(content)
+
+                type_map = {
+                    'PRECEDED_BY':    ('Strategy',  'Concept'),
+                    'FOLLOWED_BY':    ('Tactic',    'Tactic'),
+                    'HAS_ALTERNATIVE':('Competency','Strategy'),
+                    'IS_PREQUEL_TO':  ('Concept',   'Competency'),
+                }
+
+                for s in suggestions:
+                    subj_type, obj_type = type_map.get(
+                        s['relation'], ('Concept', 'Concept')
+                    )
+                    # Override subject type for HAS_ALTERNATIVE to use real comp_label
+                    if s['relation'] == 'HAS_ALTERNATIVE':
+                        subj_type = comp_label
+
+                    self.db.insert_triplet(
+                        subject=s['subject'], subject_type=subj_type,
+                        relation=s['relation'],
+                        obj=s['object'], obj_type=obj_type
+                    )
+                    print(f"    [{s['relation']}] ({s['subject']}) -> ({s['object']})")
+            except Exception as e:
+                print(f"  Error in prequel/sequel for '{strategy}': {e}")
+
+    # ── Phase F: Tactic detail — replies, intent, difficulty, when ───────────
+
+    def run_tactic_detail_enrichment(self):
+        """
+        For each Tactic node that lacks detail, ask the LLM to generate:
+        - REPLIES_TO    : the triggering problem/situation this tactic responds to
+        - INTENDS_TO    : the desired outcome the tactic is designed to achieve
+        - Properties    : difficulty (Beginner/Intermediate/Advanced),
+                          applies_when (one-sentence context guide)
+        stored directly on the Tactic node.
+        """
+        print("\n[Enrichment Phase F] Adding tactic replies, intent & detail...")
+        if not self.client:
+            print("Skipping tactic detail enrichment: no API key.")
+            return
+
+        query = """
+        MATCH (s:Strategy)-[:HAS_TACTIC]->(t:Tactic)
+        WHERE t.name IS NOT NULL
+          AND (t.difficulty IS NULL OR t.intent IS NULL)
+        OPTIONAL MATCH (comp)-[:HAS_STRATEGY]->(s)
+        RETURN t.name AS tactic, s.name AS strategy,
+               collect(comp.name)[0] AS competency
+        LIMIT 20
+        """
+        try:
+            records = self.db.execute_read(query) or []
+        except Exception as e:
+            print(f"Error fetching tactics without detail: {e}")
+            return
+
+        for record in records:
+            tactic     = record.get("tactic")
+            strategy   = record.get("strategy", "")
+            competency = record.get("competency", "")
+            if not tactic:
+                continue
+
+            print(f"  Detailing tactic: [{tactic}] in [{strategy}]")
+            prompt = f"""
+You are a leadership educator. Describe the leadership tactic "{tactic}" concisely.
+
+Context:
+- Competency: "{competency}"
+- Strategy  : "{strategy}"
+
+Produce EXACTLY these 4 lines (no headers, no numbering, no extra text):
+
+"{tactic}" -> [REPLIES_TO] -> "Short problem or situation this tactic addresses"
+"{tactic}" -> [INTENDS_TO] -> "Short desired outcome this tactic achieves"
+DIFFICULTY: Beginner|Intermediate|Advanced
+APPLIES_WHEN: One sentence describing when a leader should use this tactic.
+"""
+            try:
+                response = self.client.chat.completions.create(
+                    model="deepseek-chat",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3
+                )
+                content = response.choices[0].message.content.strip()
+
+                # Parse graph edges
+                suggestions = self._parse_enrichment_suggestions(content)
+                for s in suggestions:
+                    if s['relation'] == 'REPLIES_TO':
+                        self.db.insert_triplet(
+                            subject=s['subject'], subject_type='Tactic',
+                            relation='REPLIES_TO',
+                            obj=s['object'], obj_type='Context'
+                        )
+                    elif s['relation'] == 'INTENDS_TO':
+                        self.db.insert_triplet(
+                            subject=s['subject'], subject_type='Tactic',
+                            relation='INTENDS_TO',
+                            obj=s['object'], obj_type='Outcome'
+                        )
+
+                # Parse scalar properties and write onto the Tactic node
+                difficulty   = None
+                applies_when = None
+                for line in content.splitlines():
+                    if line.startswith("DIFFICULTY:"):
+                        difficulty = line.split(":", 1)[1].strip()
+                    elif line.startswith("APPLIES_WHEN:"):
+                        applies_when = line.split(":", 1)[1].strip()
+
+                if difficulty or applies_when:
+                    prop_query = """
+                    MATCH (t:Tactic {name: $name})
+                    SET t.difficulty   = coalesce($difficulty, t.difficulty),
+                        t.applies_when = coalesce($applies_when, t.applies_when)
+                    """
+                    try:
+                        self.db.execute_write(prop_query, {
+                            "name": tactic,
+                            "difficulty": difficulty,
+                            "applies_when": applies_when,
+                        })
+                        print(f"    Props set — difficulty:{difficulty} | applies_when:{applies_when}")
+                    except Exception as e:
+                        print(f"    Failed to set tactic props: {e}")
+
+            except Exception as e:
+                print(f"  Error detailing tactic '{tactic}': {e}")
+
+    # ── Orchestrator ──────────────────────────────────────────────────────────
+
+    def _phase(self, label, fn):
+        if self.progress_cb:
+            self.progress_cb(label)
+        print(f"\n[Enrichment] {label}")
+        fn()
+
+    def run_enrichment(self):
+        """Run all enrichment phases in sequence."""
+        self._phase("Phase A: bridging isolated nodes", self.run_isolation_enrichment)
+        self._phase("Phase B: generating strategies & tactics", self.run_strategy_tactic_enrichment)
+        self._phase("Phase C: discovering learning paths", self.run_path_enrichment)
+        self._phase("Phase D: adding alternative paths", self.run_alternative_path_enrichment)
+        self._phase("Phase E: prequels, sequels & alternatives", self.run_prequel_sequel_enrichment)
+        self._phase("Phase F: tactic replies, intent & detail", self.run_tactic_detail_enrichment)
+        if self.progress_cb:
+            self.progress_cb("Enrichment complete")
+        print("\nGraph Enrichment Engine complete.")

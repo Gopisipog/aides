@@ -1,0 +1,34 @@
+# ── Environment ──────────────────────────────────────────────────────────────
+.env
+.streamlit/secrets.toml
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+*.whl
+.ruff_cache/
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data/raw/*
+data/live_audio/*
+data/processed/*
+!data/processed/.gitkeep
+
+# ── IDE / OS ────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Neo4j ───────────────────────────────────────────────────────────────────
+data/neo4j/import/
+data/neo4j/logs/
+data/neo4j/data/
