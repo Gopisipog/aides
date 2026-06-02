@@ -13,7 +13,6 @@ import socket
 from datetime import datetime
 
 import streamlit as st
-import static_ffmpeg
 
 # ── Load configuration ───────────────────────────────────────────────────────
 # Priority: Streamlit secrets > .env file > environment variables
@@ -21,11 +20,22 @@ from dotenv import load_dotenv
 
 load_dotenv()  # .env is fallback for local dev; Streamlit secrets override
 
-# Ensure ffmpeg is available in PATH
-try:
-    static_ffmpeg.add_paths()
-except Exception:
-    pass  # Not critical — ffmpeg from packages.txt on cloud
+# ── Cloud detection ──────────────────────────────────────────────────────────
+def _is_streamlit_cloud() -> bool:
+    """Detect if running on Streamlit Community Cloud."""
+    hostname = socket.gethostname()
+    return any(marker in os.environ.get("STREAMLIT_SERVER_HEADER", "")
+               for marker in ["streamlit", "share"]) or "streamlit" in hostname.lower()
+
+IS_CLOUD = os.environ.get("AIDE_DEPLOYMENT", "").lower() == "cloud" or _is_streamlit_cloud()
+
+# ── Ensure ffmpeg is available in PATH ───────────────────────────────────────
+if not IS_CLOUD:
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except Exception:
+        pass  # ffmpeg from packages.txt on cloud, or system install locally
 
 # ── Cloud detection ──────────────────────────────────────────────────────────
 def _is_streamlit_cloud() -> bool:
