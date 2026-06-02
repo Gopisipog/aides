@@ -143,8 +143,14 @@ class IngestionTool(BaseTool):
             text_segments = processor.process(video_path, audio_path, CORPUS_PATH, video_id=video_id)
         except Exception as e:
             estr = str(e).lower()
-            if "drm" in estr or "403" in estr or "requested format" in estr:
-                print(f"Download failed ({estr[:60]}...). Falling back to transcript API.")
+            # These errors mean we can't download the media, but captions may still be available
+            fallback_keywords = [
+                "drm", "403", "requested format",
+                "sign in", "bot", "cookies", "authentication",
+                "unavailable", "restricted", "private", "premium",
+            ]
+            if any(kw in estr for kw in fallback_keywords):
+                print(f"Download failed ({estr[:80]}...). Falling back to transcript API.")
                 download_success = False
             else:
                 db.close()
