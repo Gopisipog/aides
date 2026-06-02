@@ -15,9 +15,12 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
-    VideoUnavailable,
-    TooManyRequests,
 )
+try:
+    from youtube_transcript_api._errors import VideoUnavailable
+except ImportError:
+    # Older versions of youtube-transcript-api don't have VideoUnavailable
+    VideoUnavailable = type("VideoUnavailable", (Exception,), {})
 
 
 class TranscriptFetcher:
@@ -57,7 +60,6 @@ class TranscriptFetcher:
             TranscriptsDisabled: No captions available for this video.
             NoTranscriptFound: Captions exist but not in requested language.
             VideoUnavailable: Video is private/deleted.
-            TooManyRequests: Rate limited.
         """
         if languages is None:
             languages = ["en", "en-US", "en-GB"]
@@ -178,7 +180,5 @@ class TranscriptFetcher:
             return True
         except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable):
             return False
-        except TooManyRequests:
-            return True  # Assume available, rate limited
         except Exception:
             return False
