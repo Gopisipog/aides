@@ -111,9 +111,6 @@ class IngestionTool(BaseTool):
             return {"status": "error", "message": "No URL provided for YouTube ingestion."}
 
         # ── Init runtime deps ────────────────────────────────────────────
-        # static_ffmpeg bundles ffmpeg for systems without it. On Streamlit
-        # Cloud, ffmpeg comes from apt-get (packages.txt) and the venv is
-        # read-only, so we must avoid importing static_ffmpeg entirely.
         import importlib.util
         import shutil
         if not shutil.which("ffmpeg"):
@@ -133,13 +130,70 @@ class IngestionTool(BaseTool):
         meta = downloader.fetch_metadata(url)
         video_id = meta["video_id"]
 
-        # ── Download ─────────────────────────────────────────────────────
-        video_path = downloader.download_video(url, video_id=video_id)
-        audio_path = downloader.download_audio(url, video_id=video_id)
+        # ── Attempt download; fall back to transcript API ─────────────────
+        text_segments = None
+        download_success = True
 
-        # ── Transcribe ───────────────────────────────────────────────────
-        processor = MultimodalProcessor()
-        text_segments = processor.process(video_path, audio_path, CORPUS_PATH, video_id=video_id)
+        try:
+            video_path = downloader.download_video(url, video_id=video_id)
+            audio_path = downloader.download_audio(url, video_id=video_id)
+
+            # ── Transcribe ───────────────────────────────────────────────
+            processor = MultimodalProcessor()
+            text_segments = processor.process(video_path, audio_path, CORPUS_PATH, video_id=video_id)
+        except Exception as e:
+            estr = str(e).lower()
+            if "drm" in estr or "403" in estr or "requested format" in estr:
+                print(f"Download failed ({estr[:60]}...). Falling back to transcript API.")
+                download_success = False
+            else:
+                db.close()
+                return {"status": "error", "message": f"Download failed: {e}"}
+
+        # ── Fallback: fetch transcript directly (DRM, 403, etc.) ─────────
+        if not download_success or (text_segments is not None and len(text_segments) == 0):
+            from src.ingestion.transcript_fetcher import TranscriptFetcher
+            fetcher = TranscriptFetcher()
+            try:
+                transcript_segments, meta = fetcher.get_transcript_with_metadata(
+                    video_id, metadata_source="yt_dlp"
+                )
+                if not transcript_segments:
+                    db.close()
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"Video '{video_id}' is DRM protected and "
+                            "no captions are available. Ingestion requires "
+                            "either downloadable audio or closed captions."
+                        )
+                    }
+
+                # Normalize transcript segments to match Whisper format
+                text_segments = []
+                for seg in transcript_segments:
+                    text_segments.append({
+                        "start_time": seg["start"],
+                        "end_time": seg["end"],
+                        "transcript": seg["text"],
+                        "visual_text": "",
+                        "video_id": video_id,
+                    })
+
+                # Use metadata from transcript fetcher if available
+                meta["title"] = meta.get("title", meta["title"])
+                meta["channel"] = meta.get("channel", "Unknown")
+                meta["duration_sec"] = meta.get("duration_sec", 0)
+            except Exception as tf_error:
+                db.close()
+                return {
+                    "status": "error",
+                    "message": (
+                        f"Video is DRM protected and transcript "
+                        f"fetching also failed: {tf_error}"
+                    )
+                }
+
         if not text_segments:
             db.close()
             return {"status": "error", "message": "Transcription produced 0 segments."}
