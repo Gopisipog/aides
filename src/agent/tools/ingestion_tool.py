@@ -111,9 +111,16 @@ class IngestionTool(BaseTool):
             return {"status": "error", "message": "No URL provided for YouTube ingestion."}
 
         # ── Init runtime deps ────────────────────────────────────────────
-        import static_ffmpeg
+        # static_ffmpeg bundles ffmpeg for systems without it. On Streamlit
+        # Cloud, ffmpeg comes from apt-get (packages.txt) and the venv is
+        # read-only, so we must avoid importing static_ffmpeg entirely.
+        import importlib.util
+        import shutil
+        if not shutil.which("ffmpeg"):
+            if importlib.util.find_spec("static_ffmpeg") is not None:
+                import static_ffmpeg  # type: ignore
+                static_ffmpeg.add_paths()  # type: ignore
         from dotenv import load_dotenv
-        static_ffmpeg.add_paths()
         load_dotenv()
 
         # ── Init DB ──────────────────────────────────────────────────────

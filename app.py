@@ -30,12 +30,14 @@ def _is_streamlit_cloud() -> bool:
 IS_CLOUD = os.environ.get("AIDE_DEPLOYMENT", "").lower() == "cloud" or _is_streamlit_cloud()
 
 # ── Ensure ffmpeg is available in PATH ───────────────────────────────────────
-if not IS_CLOUD:
-    try:
-        import static_ffmpeg
-        static_ffmpeg.add_paths()
-    except Exception:
-        pass  # ffmpeg from packages.txt on cloud, or system install locally
+# On Streamlit Cloud, ffmpeg is installed via apt-get (packages.txt).
+# On local Windows, use shutil.which() to find it.
+# static_ffmpeg is NOT imported at module level because it tries to write
+# a lock file to the venv directory, which is read-only on Streamlit Cloud.
+import shutil
+if not shutil.which("ffmpeg"):
+    import warnings
+    warnings.warn("ffmpeg not found in PATH. Install ffmpeg or ensure it's available.")
 
 # ── Cloud detection ──────────────────────────────────────────────────────────
 def _is_streamlit_cloud() -> bool:

@@ -6,7 +6,6 @@ sentence-transformers
 neo4j
 streamlit
 python-dotenv
-static-ffmpeg
 sounddevice>=0.4.6
 soundfile>=0.12.1
 numpy>=1.24.0

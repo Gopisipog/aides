@@ -11,12 +11,16 @@ if sys.stderr.encoding and sys.stderr.encoding.lower() != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from dotenv import load_dotenv
 
-# Ensure ffmpeg is available in PATH (static_ffmpeg for local, system ffmpeg for cloud/CI)
-try:
-    import static_ffmpeg
-    static_ffmpeg.add_paths()
-except Exception:
-    pass  # skip if read-only venv (Streamlit Cloud) or static_ffmpeg not installed
+# Ensure ffmpeg is available in PATH
+# On Streamlit Cloud / CI: ffmpeg is installed system-wide via apt-get (packages.txt).
+# On local Windows: fall back to static_ffmpeg if system ffmpeg is missing.
+import shutil
+if not shutil.which("ffmpeg"):
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths()
+    except Exception:
+        pass  # skip if read-only venv (Streamlit Cloud) or static_ffmpeg not installed
 
 from src.ingestion.downloader import YouTubeDownloader
 from src.ingestion.processor import MultimodalProcessor
