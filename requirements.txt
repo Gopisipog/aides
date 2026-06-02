@@ -1,6 +1,6 @@
 openai>=1.0.0
 openai-whisper
-yt-dlp
+yt-dlp>=2026.3.17
 easyocr
 sentence-transformers
 neo4j
