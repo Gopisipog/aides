@@ -5,12 +5,6 @@ import json
 import datetime
 from typing import Any, Dict, Optional
 
-from dotenv import load_dotenv
-import static_ffmpeg
-
-static_ffmpeg.add_paths()
-load_dotenv()
-
 from src.ingestion.downloader import YouTubeDownloader
 from src.ingestion.processor import MultimodalProcessor
 from src.ingestion.live_audio import LiveAudioIngestor, list_audio_devices
@@ -115,6 +109,12 @@ class IngestionTool(BaseTool):
     def _ingest_youtube(self, url: str) -> Dict[str, Any]:
         if not url:
             return {"status": "error", "message": "No URL provided for YouTube ingestion."}
+
+        # ── Init runtime deps ────────────────────────────────────────────
+        import static_ffmpeg
+        from dotenv import load_dotenv
+        static_ffmpeg.add_paths()
+        load_dotenv()
 
         # ── Init DB ──────────────────────────────────────────────────────
         db = Neo4jClient()

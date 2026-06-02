@@ -1,9 +1,5 @@
 import yt_dlp
 import os
-import static_ffmpeg
-
-# Ensure ffmpeg is available in PATH
-static_ffmpeg.add_paths()
 
 class YouTubeDownloader:
     """Wrapper for yt-dlp to download video and audio from YouTube URLs."""

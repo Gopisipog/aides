@@ -32,3 +32,6 @@ Thumbs.db
 data/neo4j/import/
 data/neo4j/logs/
 data/neo4j/data/
+
+# ── Stray Windows artifacts ─────────────────────────────────────────────────
+nul

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "v-lkg-app",
+      "runtimeExecutable": "C:\\Program Files\\Python311\\python.exe",
+      "runtimeArgs": ["-X", "utf8", "-m", "streamlit", "run", "app.py", "--server.port=8501", "--server.headless=true"],
+      "port": 8501
+    }
+  ]
+}

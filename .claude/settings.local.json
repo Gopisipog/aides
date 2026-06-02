@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501)",
+      "Bash(ls \"E:\\\\User\\\\Documents\\\\augment-projects\\\\ipogsites\\\\v_lkg_reproduction\\\\data\\\\processed\"\" && ls \"E:UserDocumentsaugment-projectsipogsitesv_lkg_reproductiondata\"\")",
+      "Bash(python -c \":*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501/healthz)",
+      "Bash(pip show:*)"
+    ]
+  }
+}
